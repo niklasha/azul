@@ -5,7 +5,7 @@ use crate::{
     RectContent::{Image, Text},
     anon::{AnonDom, AnonNode::{InlineNode, BlockNode, AnonStyle}},
     style::{Style, Overflow as StyleOverflow, Display, Dimension, BoxSizing},
-    number::{Number::{Defined, Undefined}, MinMax, OrElse},
+    number::{Number, Number::{Defined, Undefined}, MinMax, OrElse},
 };
 use azul_core::{
     id_tree::NodeHierarchy,
@@ -87,7 +87,7 @@ fn solve_widths<T: GetTextLayout>(
         let id: NodeId = $id;
         if $parent_content_size > 0.0 {
             let block_width = match &anon_dom.anon_node_data[id] {
-                BlockNode(ref style) => calculate_block_width(style, $parent_content_size),
+                BlockNode(ref style) => calculate_block_width(id, anon_dom, style, $parent_content_size),
                 InlineNode(ref style) => {
 
                     let original_node_id = &anon_dom.reverse_node_id_mapping.get(&id).unwrap();
@@ -97,6 +97,7 @@ fn solve_widths<T: GetTextLayout>(
 
                     let w = calculate_inline_width(
                         id,
+                        anon_dom,
                         last_trailing,
                         rect_contents.get_mut(original_node_id),
                         style,
@@ -111,6 +112,7 @@ fn solve_widths<T: GetTextLayout>(
                         width: w.width,
                         border_width: w.border_width,
                         margin: w.margin,
+                        collapsed_margin: w.collapsed_margin,
                         padding: w.padding,
                     }
                 },
@@ -182,6 +184,11 @@ fn solve_heights<T: GetTextLayout>(
 
         if current_depth_level != *depth {
             if let Some(last_parent) = last_parent {
+                // Calculate the total height of the children, watch out for collapsed margins!
+                // Note that the margin can also bleed into the parent.
+                let children_height_sum = last_parent.children(&anon_dom.anon_node_hierarchy).map(|child_id| {
+
+                }).sum();
                 content_heights.insert(last_parent, children_height_sum);
             }
             last_parent = None;
@@ -193,6 +200,7 @@ fn solve_heights<T: GetTextLayout>(
 
         for child_id in parent_node_id.children(&anon_dom.anon_node_hierarchy) {
 
+            fn sum_children_content_height()
             let self_width = positioned_rects[child_id].bounds.size.width;
             let children_content_height = child_id
                 .children(&anon_dom.anon_node_hierarchy)
@@ -202,6 +210,8 @@ fn solve_heights<T: GetTextLayout>(
             let block_height = match &anon_dom.anon_node_data[child_id] {
                 BlockNode(ref style) => {
                     calculate_block_height(
+                        child_id,
+                        anon_dom,
                         style,
                         parent_size.width,
                         parent_size.height,
@@ -213,6 +223,8 @@ fn solve_heights<T: GetTextLayout>(
                 },
                 InlineNode(ref style) => {
                     calculate_block_height(
+                        child_id,
+                        anon_dom,
                         style,
                         parent_size.width,
                         parent_size.height,
@@ -228,11 +240,9 @@ fn solve_heights<T: GetTextLayout>(
                 }
             };
 
-            content_heights.insert(child_id, block_height.margin_box_height());
+            content_heights.insert(child_id, block_height);
 
             apply_block_height(block_height, &mut positioned_rects[child_id]);
-
-            children_height_sum += block_height.margin_box_height();
         }
     }
 
@@ -242,6 +252,8 @@ fn solve_heights<T: GetTextLayout>(
     match &anon_dom.anon_node_data[NodeId::ZERO] {
         BlockNode(ref style) | InlineNode(ref style) => {
             let mut root_block_height = calculate_block_height(
+                NodeId::ZERO,
+                anon_dom,
                 style,
                 root_size.width,
                 root_size.height,
@@ -445,7 +457,7 @@ fn position_items(
     }
 }
 
-// Figure out the origin of a rect, given
+// Figure out the origin and size of a position:absolute rect, given
 fn figure_out_position(
     parent: LayoutRect,
     child_style: &Style,
@@ -491,17 +503,22 @@ fn figure_out_position(
 // NOTE: Only use when using horizontal layouts, not block layouts!
 fn get_collapsed_horz_margin(
     node_id: NodeId,
-    anon_node_hierarchy: &NodeHierarchy,
-    positioned_rects: &NodeDataContainer<PositionedRectangle>,
+    anon_dom: &AnonDom,
+    parent_width: Number,
 ) -> (f32, f32) {
 
-    let previous_sibling = &anon_node_hierarchy[node_id].previous_sibling;
-    let next_sibling = &anon_node_hierarchy[node_id].next_sibling;
-    let positioned_rect = &positioned_rects[node_id];
-    let (margin_right, margin_left) = (positioned_rect.margin.right, positioned_rect.margin.left);
+    let previous_sibling = &anon_dom.anon_node_hierarchy[node_id].previous_sibling;
+    let next_sibling = &anon_dom.anon_node_hierarchy[node_id].next_sibling;
+    let anon_node = &anon_dom.anon_node_data[node_id];
+    let (margin_right, margin_left) = (anon_node.margin.right.resolve(parent_width), anon_node.margin.left.resolve(parent_width));
 
-    let previous_sibling_margin_right = previous_sibling.map(|ps| positioned_rects[ps].margin.right).unwrap_or(0.0);
-    let next_sibling_margin_left = next_sibling.map(|ps| positioned_rects[ps].margin.left).unwrap_or(0.0);
+    let previous_sibling_margin_right = previous_sibling.map(|ps| {
+        anon_dom.anon_node_data[ps].margin.right.resolve(parent_width).unwrap_or_zero()
+    }).unwrap_or(0.0);
+
+    let next_sibling_margin_left = next_sibling.map(|ns| {
+        anon_dom.anon_node_data[ns].margin.left.resolve(parent_width).unwrap_or_zero()
+    }).unwrap_or(0.0);
 
     (previous_sibling_margin_right.max(margin_left), next_sibling_margin_left.max(margin_right))
 }
@@ -509,17 +526,22 @@ fn get_collapsed_horz_margin(
 // Get the collapsed (top, bottom) margins of this node, i.e. the larger of the two margins
 fn get_collapsed_vert_margin(
     node_id: NodeId,
-    anon_node_hierarchy: &NodeHierarchy,
-    positioned_rects: &NodeDataContainer<PositionedRectangle>,
+    anon_dom: &AnonDom,
+    parent_width: Number,
 ) -> (f32, f32) {
 
-    let previous_sibling = &anon_node_hierarchy[node_id].previous_sibling;
-    let next_sibling = &anon_node_hierarchy[node_id].next_sibling;
-    let positioned_rect = &positioned_rects[node_id];
-    let (margin_top, margin_bottom) = (positioned_rect.margin.top, positioned_rect.margin.bottom);
+    let previous_sibling = &anon_dom.anon_node_hierarchy[node_id].previous_sibling;
+    let next_sibling = &anon_dom.anon_node_hierarchy[node_id].next_sibling;
+    let anon_node = &anon_dom.anon_node_data[node_id];
+    let (margin_top, margin_bottom) = (anon_node.margin.top.resolve(parent_width), anon_node.margin.bottom.resolve(parent_width));
 
-    let previous_sibling_margin_bottom = previous_sibling.map(|ps| positioned_rects[ps].margin.bottom).unwrap_or(0.0);
-    let next_sibling_margin_top = next_sibling.map(|ps| positioned_rects[ps].margin.top).unwrap_or(0.0);
+    let previous_sibling_margin_top = previous_sibling.map(|ps| {
+        anon_dom.anon_node_data[ps].margin.top.resolve(parent_width).unwrap_or_zero()
+    }).unwrap_or(0.0);
+
+    let next_sibling_margin_bottom = next_sibling.map(|ns| {
+        anon_dom.anon_node_data[ns].margin.bottom.resolve(parent_width).unwrap_or_zero()
+    }).unwrap_or(0.0);
 
     (previous_sibling_margin_bottom.max(margin_top), next_sibling_margin_top.max(margin_bottom))
 }
@@ -531,6 +553,7 @@ struct BlockWidth {
     width: f32,
     border_width: (f32, f32),
     margin: (f32, f32),
+    collapsed_margin: (f32, f32),
     padding: (f32, f32),
 }
 
@@ -547,6 +570,8 @@ impl BlockWidth {
 
 // see: https://limpet.net/mbrubeck/2014/09/17/toy-layout-engine-6-block.html
 fn calculate_block_width(
+    node_id: NodeId,
+    anon_dom: &AnonDom,
     style: &Style,
     parent_content_width: f32,
 ) -> BlockWidth {
@@ -649,6 +674,7 @@ struct InlineWidth {
     width: f32,
     border_width: (f32, f32),
     margin: (f32, f32),
+    collapsed_margin: (f32, f32),
     padding: (f32, f32),
     trailing: Option<f32>,
 }
@@ -666,6 +692,7 @@ impl InlineWidth {
 
 fn calculate_inline_width<T: GetTextLayout>(
     node_id: NodeId,
+    anon_dom: &AnonDom,
     last_leading: Option<f32>,
     rect_content: Option<&mut RectContent<T>>,
     style: &Style,
@@ -679,6 +706,9 @@ fn calculate_inline_width<T: GetTextLayout>(
     }
 
     let pw = Defined(parent_content_width);
+
+    let padding_left = style.padding.left.resolve(pw).or_else(0.0);
+    let padding_right = style.padding.right.resolve(pw).or_else(0.0);
 
     let mut leading = None;
 
@@ -700,7 +730,7 @@ fn calculate_inline_width<T: GetTextLayout>(
 
             let text_layout_options = ResolvedTextLayoutOptions {
                 max_horizontal_width: if parent_overflow_x.allows_horizontal_overflow() { None } else { Some(parent_content_width) },
-                leading: last_leading,
+                leading: last_leading + padding_left,
                 holes: Vec::new(),
                 font_size_px: style.font_size_px.to_pixels(DEFAULT_FONT_SIZE_PX as f32),
                 letter_spacing: style.letter_spacing.map(|ls| ls.to_pixels(DEFAULT_LETTER_SPACING)),
@@ -711,7 +741,7 @@ fn calculate_inline_width<T: GetTextLayout>(
 
             let layouted_inline_text = t.get_text_layout(&text_layout_options);
 
-            leading = Some(layouted_inline_text.get_trailing());
+            leading = Some(layouted_inline_text.get_trailing() + padding_right);
 
             let inline_text_bounds = layouted_inline_text.get_bounds();
 
@@ -721,11 +751,10 @@ fn calculate_inline_width<T: GetTextLayout>(
         },
     };
 
+    let collapsed_margin = get_collapsed_horz_margin(node_id, anon_dom, pw);
+
     let margin_left = style.margin.left.resolve(pw).or_else(0.0);
     let margin_right = style.margin.right.resolve(pw).or_else(0.0);
-
-    let padding_left = style.padding.left.resolve(pw).or_else(0.0);
-    let padding_right = style.padding.right.resolve(pw).or_else(0.0);
 
     let border_width_left = style.border.left.resolve(pw).or_else(0.0);
     let border_width_right = style.border.right.resolve(pw).or_else(0.0);
@@ -746,6 +775,7 @@ fn calculate_inline_width<T: GetTextLayout>(
         width,
         border_width: (border_width_left, border_width_right),
         margin: (margin_left, margin_right),
+        collapsed_margin,
         padding: (padding_left, padding_right),
         trailing: if style.display == Display::Inline { leading } else { None }
     }
@@ -769,6 +799,7 @@ struct BlockHeight {
     content_height: Option<f32>,
     border_height: (f32, f32),
     margin: (f32, f32),
+    collapsed_margin: (f32, f32),
     padding: (f32, f32),
 }
 
@@ -784,6 +815,8 @@ impl BlockHeight {
 }
 
 fn calculate_block_height<T: GetTextLayout>(
+    node_id: NodeId,
+    anon_dom: &AnonDom,
     style: &Style,
     parent_width: f32,
     parent_height: f32,
@@ -835,6 +868,8 @@ fn calculate_block_height<T: GetTextLayout>(
     // The percentage is calculated with respect to the *width* of the generated box’s
     // containing block. Note that this is true for margin-top and margin-bottom as well.
 
+    let collapsed_margin = get_collapsed_vert_margin(node_id, anon_dom, pw)
+
     let margin_top = style.margin.top.resolve(pw).or_else(0.0);
     let margin_bottom = style.margin.bottom.resolve(pw).or_else(0.0);
 
@@ -861,6 +896,7 @@ fn calculate_block_height<T: GetTextLayout>(
         content_height,
         border_height: (border_height_top, border_height_bottom),
         margin: (margin_top, margin_bottom),
+        collapsed_margin,
         padding: (padding_top, padding_bottom),
     }
 }

@@ -216,3 +216,43 @@
         )
     </output>
 </test>
+
+<!-- Test that two divs can have margins that bleed into each other -->
+<!-- In this case, the 20px margin-top should overlap the 30px margin-bottom -->
+<test name="margin-collapsing-block-layout">
+    <html>
+        <body>
+            <div id="foo" />
+            <div id="bar" />
+        </body>
+    </html>
+
+    <style>
+        #foo, #bar {
+            width: 50px;
+            height: 50px;
+        }
+
+        #foo {
+            margin-bottom: 30px;
+        }
+
+        #bar {
+            margin-top: 20px;
+        }
+    </style>
+
+    <output size="500x500">
+        Frame(
+            rect: 500x130 @ (0, 0),
+            children: [
+                Frame(
+                    rect: 50x50 @ (0, 0),
+                ),
+                Frame(
+                    rect: 50x50 @ (0, 80),
+                ),
+            ],
+        )
+    </output>
+</test>
