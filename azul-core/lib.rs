@@ -1,5 +1,7 @@
 //! Shared datatypes for azul-* crates
 
+#![feature(const_fn)]
+
 extern crate azul_css;
 extern crate gleam;
 #[cfg(feature = "css_parser")]
