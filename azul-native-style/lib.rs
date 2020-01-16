@@ -13,7 +13,7 @@ pub const NATIVE_CSS: &str = concat!(
 );
 
 /// CSS mimicking the OS-native look - Linux: `styles/native_linux.css`
-#[cfg(target_os="linux")]
+#[cfg(any(target_os="linux", target_os="openbsd"))]
 pub const NATIVE_CSS: &str = concat!(
     include_str!("styles/native_linux.css"),
     include_str!("styles/shared/table.css"),
